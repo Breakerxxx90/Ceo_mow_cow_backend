@@ -393,9 +393,9 @@ app.get('/api/admin/profit-loss', requireUser, requireRole(...OWNER_ONLY), (req,
 });
 
 // ---------- Static Files & Error Handling ----------
-app.use(express.static(path.join(__dirname, '..', 'frontend')));
+app.use(express.static(path.join(__dirname, 'frontend')));
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'frontend', 'home.html')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'frontend', 'index.html')));
 
 app.use((err, req, res, next) => { 
   console.error(err); 
