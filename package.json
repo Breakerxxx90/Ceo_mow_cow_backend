@@ -1,16 +1,17 @@
 {
   "name": "ceo-mekkaw-backend",
-  "version": "0.1.0",
-  "description": "Backend for CEO เมากาว marketplace",
+  "version": "0.2.0",
+  "description": "Backend for CEO เมากาว marketplace (Postgres)",
   "main": "server.js",
   "scripts": {
-    "start": "node migrate.js && node server.js",
-    "migrate": "node migrate.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate": "node migrate.js"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "better-sqlite3": "^12.4.1",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "pg": "^8.11.3",
+    "better-sqlite3": "^12.4.1"
   }
 }

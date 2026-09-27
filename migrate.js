@@ -1,153 +1,147 @@
-const Database = require('better-sqlite3');
+// ย้ายข้อมูลจริงจาก data/shop.db (SQLite เดิม) เข้า Postgres (Neon) ผ่าน DATABASE_URL
+// รันครั้งเดียวตอนเปลี่ยนระบบ ไม่ต้องรันทุกครั้งที่ deploy
+//
+// วิธีใช้:
+//   1) รัน schema.sql ใน Neon SQL Editor ก่อน (สร้างตารางเปล่า)
+//   2) เอาไฟล์ data/shop.db เดิมไปวางไว้ที่ path เดียวกันในเครื่องที่จะรันสคริปต์นี้
+//   3) ตั้งค่า DATABASE_URL แล้วรัน: node migrate.js
+//      Windows (PowerShell): $env:DATABASE_URL="postgres://..."; node migrate.js
+//      Mac/Linux:             DATABASE_URL="postgres://..." node migrate.js
+//   4) สคริปต์ใช้ ON CONFLICT DO NOTHING จึงรันซ้ำได้โดยไม่ทำข้อมูลซ้ำ
+
 const path = require('path');
-const fs = require('fs');
+const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 
-const dataDir = path.join(__dirname, 'data');
-fs.mkdirSync(dataDir, { recursive: true });
-const db = new Database(path.join(dataDir, 'shop.db'));
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS brands (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    image TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    price REAL NOT NULL DEFAULT 0,
-    brand TEXT NOT NULL DEFAULT '',
-    category TEXT NOT NULL DEFAULT 'Woman',
-    stock INTEGER NOT NULL DEFAULT 0,
-    rating REAL NOT NULL DEFAULT 4.5,
-    description TEXT NOT NULL DEFAULT '',
-    image TEXT NOT NULL DEFAULT '',
-    featured INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE TABLE IF NOT EXISTS saved (
-    user_id INTEGER NOT NULL,
-    product_id INTEGER NOT NULL,
-    PRIMARY KEY (user_id, product_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-  );
-  CREATE TABLE IF NOT EXISTS cart_items (
-    user_id INTEGER NOT NULL,
-    product_id INTEGER NOT NULL,
-    quantity INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (user_id, product_id),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-  );
-  CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    total REAL NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'ชำระเงินแล้ว',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-  CREATE TABLE IF NOT EXISTS order_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id INTEGER NOT NULL,
-    product_id INTEGER NOT NULL,
-    quantity INTEGER NOT NULL,
-    price REAL NOT NULL,
-    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
-    FOREIGN KEY (product_id) REFERENCES products(id)
-  );
-`);
-
-const userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
-if (!userCount) {
-  const addUser = db.prepare('INSERT INTO users (username,password,role) VALUES (?,?,?)');
-  addUser.run('demo', 'demo123', 'user');
-  addUser.run('admin', 'admin1234', 'admin');
-}
-const brandNames = [...new Set(db.prepare('SELECT brand FROM products WHERE brand <> \'\'').all().map(x => x.brand))];
-const addBrand = db.prepare('INSERT OR IGNORE INTO brands (name) VALUES (?)');
-brandNames.forEach(name => addBrand.run(name));
-['Woman', 'Men', 'Home', 'Food and Drink', 'Pet'].forEach(name => addBrand.run(name));
-
-const productCount = db.prepare('SELECT COUNT(*) AS n FROM products').get().n;
-if (!productCount) {
-  const add = db.prepare(`INSERT INTO products
-    (name,price,brand,category,stock,rating,description,image,featured)
-    VALUES (?,?,?,?,?,?,?,?,?)`);
-  const products = [
-    ['Classic Blue Dress', 1290, 'Mellow', 'Woman', 18, 4.8, 'เดรสทรงคลาสสิก ใส่ได้ทั้งวันทำงานและวันหยุด', 'g-dress', 1],
-    ['Everyday Cotton Shirt', 690, 'Northline', 'Men', 25, 4.6, 'เสื้อเชิ้ตผ้าคอตตอนเนื้อนุ่ม ระบายอากาศดี', 'g-shirt', 1],
-    ['Street Runner Sneakers', 1890, 'Runway', 'Men', 12, 4.7, 'รองเท้าผ้าใบสำหรับวันสบาย ๆ น้ำหนักเบา', 'g-sneaker', 1],
-    ['Soft Home Blanket', 990, 'Cozy Lab', 'Home', 20, 4.9, 'ผ้าห่มเนื้อนุ่มสำหรับมุมพักผ่อนในบ้าน', 'g-blanket', 1],
-    ['Morning Coffee Set', 790, 'Daily Brew', 'Food and Drink', 30, 4.5, 'เซ็ตกาแฟสำหรับเริ่มต้นวันใหม่', 'g-coffee', 1],
-    ['Pet Comfort Bed', 1150, 'Paw House', 'Pet', 10, 4.8, 'เบาะนอนนุ่มสำหรับเพื่อนตัวโปรด', 'g-snack', 1]
-  ];
-  const tx = db.transaction(rows => rows.forEach(row => add.run(...row)));
-  tx(products);
-  products.forEach(row => addBrand.run(row[2]));
-}
-// ---- เพิ่มคอลัมน์/ตารางใหม่สำหรับระบบแอดมิน (รันซ้ำได้ ไม่ลบข้อมูลเดิม) ----
-const productCols = db.prepare('PRAGMA table_info(products)').all().map(c => c.name);
-if (!productCols.includes('expiry_date')) {
-  db.exec('ALTER TABLE products ADD COLUMN expiry_date TEXT');
+if (!process.env.DATABASE_URL) {
+  console.error('ไม่พบ DATABASE_URL กรุณาตั้งค่า environment variable ก่อนรันสคริปต์นี้');
+  process.exit(1);
 }
 
-// ---- เพิ่มคอลัมน์ rating (ดาว) ให้ตาราง brands (รันซ้ำได้ ไม่ลบข้อมูลเดิม) ----
-const brandCols = db.prepare('PRAGMA table_info(brands)').all().map(c => c.name);
-if (!brandCols.includes('rating')) {
-  db.exec("ALTER TABLE brands ADD COLUMN rating REAL NOT NULL DEFAULT 4.5");
+const sqlitePath = path.join(__dirname, 'data', 'shop.db');
+const sqlite = new Database(sqlitePath, { readonly: true });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// รีเซ็ตลำดับ id ของตาราง (identity column) ให้ต่อจากค่าสูงสุดที่ย้ายเข้าไป
+async function resetSeq(client, table, idCol = 'id') {
+  await client.query(
+    `SELECT setval(pg_get_serial_sequence('${table}', '${idCol}'), COALESCE((SELECT MAX(${idCol}) FROM ${table}), 1))`
+  );
 }
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS promotions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    discount_percent REAL NOT NULL DEFAULT 0,
-    product_id INTEGER,
-    starts_at TEXT,
-    ends_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
-  );
-  CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK(type IN ('income','expense')),
-    amount REAL NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+async function migrate() {
+  const client = await pool.connect();
+  try {
+    console.log('เริ่มย้ายข้อมูลจาก shop.db เข้า Postgres...\n');
 
-// ---- ย้าย role เก่า 'admin' (สิทธิ์เดียวเห็นหมด) ให้กลายเป็น 'owner' ----
-db.prepare("UPDATE users SET role='owner' WHERE role='admin'").run();
+    const users = sqlite.prepare('SELECT * FROM users').all();
+    for (const u of users) {
+      await client.query(
+        `INSERT INTO users (id,username,password,role,created_at) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO NOTHING`,
+        [u.id, u.username, u.password, u.role, u.created_at]
+      );
+    }
+    await resetSeq(client, 'users');
+    console.log(`✔ users: ${users.length} แถว`);
 
-//  สร้างบัญชีพนักงานแยกสิทธิ์ ถ้ายังไม่มี 
-const addUserIfMissing = (username, password, role) => {
-  const exists = db.prepare('SELECT 1 FROM users WHERE username=?').get(username);
-  if (!exists) db.prepare('INSERT INTO users (username,password,role) VALUES (?,?,?)').run(username, password, role);
-};
-addUserIfMissing('cashier', 'cashier123', 'cashier');
-addUserIfMissing('manager', 'manager123', 'manager');
-addUserIfMissing('owner', 'owner123', 'owner');
+    const brands = sqlite.prepare('SELECT * FROM brands').all();
+    for (const b of brands) {
+      await client.query(
+        `INSERT INTO brands (id,name,description,image,rating,created_at) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (id) DO NOTHING`,
+        [b.id, b.name, b.description, b.image, b.rating, b.created_at]
+      );
+    }
+    await resetSeq(client, 'brands');
+    console.log(`✔ brands: ${brands.length} แถว`);
 
-// ---- เพิ่มคอลัมน์เลขอ้างอิงใบเสร็จให้ตาราง orders (รันซ้ำได้ ไม่ลบข้อมูลเดิม) ----
-const orderCols = db.prepare('PRAGMA table_info(orders)').all().map(c => c.name);
-if (!orderCols.includes('ref_code')) {
-  db.exec('ALTER TABLE orders ADD COLUMN ref_code TEXT');
-  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_ref_code ON orders(ref_code)');
+    const products = sqlite.prepare('SELECT * FROM products').all();
+    for (const p of products) {
+      await client.query(
+        `INSERT INTO products (id,name,price,brand,category,stock,rating,description,image,featured,expiry_date,created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (id) DO NOTHING`,
+        [p.id, p.name, p.price, p.brand, p.category, p.stock, p.rating, p.description, p.image, p.featured, p.expiry_date, p.created_at]
+      );
+    }
+    await resetSeq(client, 'products');
+    console.log(`✔ products: ${products.length} แถว`);
+
+    const saved = sqlite.prepare('SELECT * FROM saved').all();
+    for (const s of saved) {
+      await client.query(
+        `INSERT INTO saved (user_id,product_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+        [s.user_id, s.product_id]
+      );
+    }
+    console.log(`✔ saved: ${saved.length} แถว`);
+
+    const cartItems = sqlite.prepare('SELECT * FROM cart_items').all();
+    for (const c of cartItems) {
+      await client.query(
+        `INSERT INTO cart_items (user_id,product_id,quantity) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [c.user_id, c.product_id, c.quantity]
+      );
+    }
+    console.log(`✔ cart_items: ${cartItems.length} แถว`);
+
+    const orders = sqlite.prepare('SELECT * FROM orders').all();
+    for (const o of orders) {
+      await client.query(
+        `INSERT INTO orders (id,user_id,total,status,ref_code,created_at) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (id) DO NOTHING`,
+        [o.id, o.user_id, o.total, o.status, o.ref_code, o.created_at]
+      );
+    }
+    await resetSeq(client, 'orders');
+    console.log(`✔ orders: ${orders.length} แถว`);
+
+    const orderItems = sqlite.prepare('SELECT * FROM order_items').all();
+    for (const oi of orderItems) {
+      await client.query(
+        `INSERT INTO order_items (id,order_id,product_id,quantity,price) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO NOTHING`,
+        [oi.id, oi.order_id, oi.product_id, oi.quantity, oi.price]
+      );
+    }
+    await resetSeq(client, 'order_items');
+    console.log(`✔ order_items: ${orderItems.length} แถว`);
+
+    const promotions = sqlite.prepare('SELECT * FROM promotions').all();
+    for (const p of promotions) {
+      await client.query(
+        `INSERT INTO promotions (id,title,description,discount_percent,product_id,starts_at,ends_at,created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (id) DO NOTHING`,
+        [p.id, p.title, p.description, p.discount_percent, p.product_id, p.starts_at, p.ends_at, p.created_at]
+      );
+    }
+    await resetSeq(client, 'promotions');
+    console.log(`✔ promotions: ${promotions.length} แถว`);
+
+    const transactions = sqlite.prepare('SELECT * FROM transactions').all();
+    for (const t of transactions) {
+      await client.query(
+        `INSERT INTO transactions (id,type,amount,description,created_at) VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (id) DO NOTHING`,
+        [t.id, t.type, t.amount, t.description, t.created_at]
+      );
+    }
+    await resetSeq(client, 'transactions');
+    console.log(`✔ transactions: ${transactions.length} แถว`);
+
+    console.log('\nเสร็จสิ้น! ข้อมูลทั้งหมดอยู่ใน Postgres แล้ว');
+  } catch (err) {
+    console.error('\nเกิดข้อผิดพลาดระหว่าง migrate:', err);
+  } finally {
+    client.release();
+    await pool.end();
+    sqlite.close();
+  }
 }
 
-console.log('Database ready:', path.join(dataDir, 'shop.db'));
-db.close();
+migrate();
